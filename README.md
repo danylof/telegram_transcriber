@@ -1,4 +1,4 @@
-# Telegram Bot Integration with Google Apps Script
+# Telegram Bot Integration with Open AI Whisper on Google Apps Script for OGG/MP3 audio message transcribation 
 
 ## Overview
 
@@ -37,18 +37,18 @@ This repository contains a Google Apps Script project that integrates a Telegram
 
 ### Initialization
 
-- The script initializes with a JSON object (`CREDENTIALS`) that contains all the necessary API tokens and URLs for Telegram, Google Sheets, CloudConvert, and Whisper APIs.
+- The script initializes with a JSON object (`CREDENTIALS`) that contains all the necessary API tokens and URLs for Telegram, Google Sheets, CloudConvert, and Whisper APIs. 
 
 ### Webhook Setup
 
 - **Function**: `setWebhook()`
 - **Purpose**: Sets up the Telegram webhook using the bot token and the webhook URL provided in the credentials.
-- **Usage**: Run this function after every deployment to update the webhook URL in Telegram.
+- **Usage**: Run this function after every GAS deployment to update the webhook URL in Telegram. 
 
 ### Message Handling
 
 - **Function**: `doPost(e)`
-- **Purpose**: Main entry point for handling incoming updates from Telegram. It processes incoming messages, determines if they contain audio files, and decides the appropriate action.
+- **Purpose**: Main entry point for handling incoming updates from Telegram for GAS. It processes incoming messages, determines if they contain audio files, and decides the appropriate action.
 - **Key Operations**:
   - Logs the incoming message details.
   - Identifies if the message contains audio (either voice or other formats).
