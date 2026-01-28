@@ -787,20 +787,85 @@ function transcribeWithOpenAI(audioBlob, apiKey, sheetUrl) {
   }
 }
 
-// Google Gemini transcription
+
+/**
+ * Dynamically fetches available Gemini models that support generateContent.
+ * Prioritizes 'flash' models for efficiency with video.
+ */
+function getGeminiFlashModels(apiKey, sheetUrl) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
+  
+  try {
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    const data = JSON.parse(response.getContentText());
+    
+    if (!data.models) {
+      logDebugMessage(sheetUrl, 'Warning: Could not fetch model list. Using defaults.');
+      return ['gemini-2.5-flash', 'gemini-2.0-flash'];
+    }
+
+    // Filter for models that:
+    // 1. Support 'generateContent'
+    // 2. Are not 'vision' specific (usually older) or 'pro' (slower/more expensive)
+    // 3. Contain 'flash' (optimized for high volume/video)
+    const availableModels = data.models
+      .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'))
+      .filter(m => m.name.includes('flash'))
+      .map(m => m.name.replace('models/', '')); // Remove 'models/' prefix
+
+    // Sort to put newer versions first (roughly)
+    // You can customize this sort logic if needed
+    availableModels.sort().reverse();
+    
+    logDebugMessage(sheetUrl, `Dynamic model list fetched: ${availableModels.join(', ')}`);
+    return availableModels;
+
+  } catch (e) {
+    logDebugMessage(sheetUrl, `Error fetching model list: ${e.message}. Using defaults.`);
+    return ['gemini-2.5-flash', 'gemini-2.0-flash'];
+  }
+}
+
 function transcribeWithGemini(audioBlob, apiKey, sheetUrl) {
-  // Try gemini-2.5-pro first, fall back to gemini-2.5-flash
-  const models = ['gemini-2.5-pro', 'gemini-2.5-flash'];
+  // 1. Get dynamic list of valid models using the shared helper
+  const models = getGeminiFlashModels(apiKey, sheetUrl);
   
   for (const model of models) {
-    const result = tryGeminiModel(model, audioBlob, apiKey, sheetUrl);
-    if (result && !result.text.includes('not found') && !result.text.includes('NOT_FOUND')) {
-      return result;
+    try {
+      logDebugMessage(sheetUrl, `Attempting audio transcription with model: ${model}...`);
+      
+      const result = tryGeminiModel(model, audioBlob, apiKey, sheetUrl);
+      
+      // Validation: Check if result exists and DOES NOT contain failure keywords
+      if (result && result.text) {
+        const lowerText = result.text.toLowerCase();
+        
+        // Fail conditions: Quota, Not Found, or specific API errors disguised as text
+        const isQuotaError = lowerText.includes('exceeded') || lowerText.includes('quota') || lowerText.includes('429');
+        const isNotFoundError = lowerText.includes('not found') || lowerText.includes('not_found');
+        const isMimeError = lowerText.includes('mime type') || lowerText.includes('unsupported');
+        const isGenericError = lowerText.startsWith('error:') || lowerText.startsWith('transcription failed:');
+        
+        // If it looks like valid text (none of the errors above), return it
+        if (!isQuotaError && !isNotFoundError && !isMimeError && !isGenericError) {
+          return result; 
+        }
+        
+        logDebugMessage(sheetUrl, `Model ${model} failed: "${result.text}". Switching to next...`);
+      }
+      
+    } catch (e) {
+      // Catch network or parsing crashes
+      const errorMsg = e.toString().toLowerCase();
+      if (errorMsg.includes('quota') || errorMsg.includes('exceeded') || errorMsg.includes('429')) {
+        logDebugMessage(sheetUrl, `Quota exceeded on ${model}. Switching to next...`);
+      } else {
+        logDebugMessage(sheetUrl, `Unexpected error on ${model}: ${e.toString()}. Switching to next...`);
+      }
     }
-    logDebugMessage(sheetUrl, `Model ${model} not available, trying next...`);
   }
   
-  return { text: 'Error: No Gemini model available. Check your API key and region.', language: 'unknown' };
+  return { text: 'Error: All Gemini audio models failed. Please check your billing/quota.', language: 'unknown' };
 }
 
 function tryGeminiModel(model, audioBlob, apiKey, sheetUrl) {
@@ -880,38 +945,65 @@ function tryGeminiModel(model, audioBlob, apiKey, sheetUrl) {
  * @returns {Object} Transcription result {text, language}
  */
 function transcribeVideoWithGemini(videoBlob, apiKey, sheetUrl) {
-  // Try gemini-2.0-flash first, fall back to gemini-1.5-flash-latest
-  const models = ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash-001'];
+  // 1. Get dynamic list of valid models
+  const models = getGeminiFlashModels(apiKey, sheetUrl);
   
+  // 2. Iterate through them
   for (const model of models) {
-    const result = tryGeminiVideoModel(model, videoBlob, apiKey, sheetUrl);
-    if (result && !result.text.includes('not found') && !result.text.includes('NOT_FOUND')) {
-      return result;
+    try {
+      const result = tryGeminiVideoModel(model, videoBlob, apiKey, sheetUrl);
+      
+      // If we get a result object...
+      if (result && result.text) {
+        const lowerText = result.text.toLowerCase();
+        
+        // Define what counts as a "failure" that requires retrying
+        const isQuotaError = lowerText.includes('exceeded') || lowerText.includes('quota') || lowerText.includes('429');
+        const isNotFoundError = lowerText.includes('not found') || lowerText.includes('not_found');
+        const isMimeError = lowerText.includes('mime type') || lowerText.includes('unsupported'); 
+        const isGenericError = lowerText.startsWith('error:') || lowerText.startsWith('transcription failed:');
+
+        // If it's NOT a failure, we have our transcription!
+        if (!isQuotaError && !isNotFoundError && !isGenericError && !isMimeError) {
+          return result;
+        }
+        
+        logDebugMessage(sheetUrl, `Model ${model} rejected. Reason: "${result.text}". Trying next...`);
+      }
+    } catch (e) {
+      logDebugMessage(sheetUrl, `Critical exception on ${model}: ${e.message}. Trying next...`);
     }
-    logDebugMessage(sheetUrl, `Model ${model} not available for video, trying next...`);
   }
   
-  return { text: 'Error: No Gemini model available for video. Check your API key and region.', language: 'unknown' };
+  return { text: 'Error: All available Gemini models failed. Please check your billing/quota.', language: 'unknown' };
 }
 
 function tryGeminiVideoModel(model, videoBlob, apiKey, sheetUrl) {
   const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=` + apiKey;
   
+  // CRITICAL FIX: Handle Telegram's generic MIME type
+  let mimeType = videoBlob.getContentType();
+  if (!mimeType || mimeType === 'application/octet-stream') {
+    // Telegram video notes are always MP4s. We MUST tell Gemini this is video/mp4
+    // or it will reject the 'application/octet-stream' as an unknown file.
+    mimeType = 'video/mp4';
+    logDebugMessage(sheetUrl, `Fixed MIME type: 'application/octet-stream' -> 'video/mp4'`);
+  }
+  
   // Convert video blob to base64
   const videoBase64 = Utilities.base64Encode(videoBlob.getBytes());
-  const mimeType = videoBlob.getContentType() || 'video/mp4';
   
   const payload = {
     contents: [{
       parts: [
         {
           inline_data: {
-            mime_type: mimeType,
+            mime_type: mimeType, // Use our corrected MIME type
             data: videoBase64
           }
         },
         {
-          text: "This is a video note (circular video message). Transcribe ONLY the spoken audio content in this video. Return ONLY the transcription text, nothing else. Do not describe the video visuals. If you can detect the language, start your response with [LANG:language_code] where language_code is the ISO 639-1 code (e.g., en, es, fr, de, zh, ja), then the transcription."
+          text: "This is a video note. Transcribe ONLY the spoken audio content in this video verbatim. Return ONLY the transcription text. Do not describe the video visuals. If you can detect the language, start your response with [LANG:language_code] (e.g., [LANG:en])."
         }
       ]
     }],
@@ -928,23 +1020,22 @@ function tryGeminiVideoModel(model, videoBlob, apiKey, sheetUrl) {
     muteHttpExceptions: true
   };
 
-  logDebugMessage(sheetUrl, 'Transcribing video note with Google Gemini.');
+  logDebugMessage(sheetUrl, `Attempting transcription with ${model}...`);
 
   try {
     const response = UrlFetchApp.fetch(geminiApiUrl, options);
     const jsonResponse = JSON.parse(response.getContentText());
-    logDebugMessage(sheetUrl, 'Gemini video transcription response received.');
     
+    // If Gemini returns an API error (like 429 Quota or 400 Bad Request)
     if (jsonResponse.error) {
-      logDebugMessage(sheetUrl, 'Gemini API error: ' + jsonResponse.error.message);
       return { text: 'Error: ' + jsonResponse.error.message, language: 'unknown' };
     }
     
+    // Success path
     if (jsonResponse.candidates && jsonResponse.candidates[0] && jsonResponse.candidates[0].content) {
       let text = jsonResponse.candidates[0].content.parts[0].text;
       let language = 'unknown';
       
-      // Extract language if present in [LANG:xx] format
       const langMatch = text.match(/^\[LANG:([a-z]{2,3})\]\s*/i);
       if (langMatch) {
         language = langMatch[1].toLowerCase();
@@ -953,11 +1044,9 @@ function tryGeminiVideoModel(model, videoBlob, apiKey, sheetUrl) {
       
       return { text: text.trim(), language: language };
     } else {
-      logDebugMessage(sheetUrl, 'Unexpected Gemini response format for video');
       return { text: 'Transcription failed: unexpected response format', language: 'unknown' };
     }
   } catch (e) {
-    logDebugMessage(sheetUrl, 'Error during Gemini video transcription: ' + e.message);
     return { text: 'Transcription failed: ' + e.message, language: 'unknown' };
   }
 }
